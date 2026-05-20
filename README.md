@@ -16,16 +16,16 @@ Platform teams often face inconsistent secret management across infrastructure:
 
 This module provides a **simple, reusable abstraction** that:
 - Provisions only infrastructure (containers, encryption, policies)
-- Keeps ALL secrets out of Terraform state (zero-secrets architecture)
+- Keeps ALL secrets out of Terraform state 
 - Supports multi-region replication
 - Enforces KMS encryption
-- Provides fine-grained IAM and resource-based policies
+- Provides fine grained IAM and resource based policies
 - Enables external secret rotation without Terraform involvement
 - Maintains compliance standards
 
 ## Key Features
 
-**Zero-secrets architecture** — No secret values in Terraform state or logs  
+**Zero-secrets architecture** — No application/external secret values in Terraform state or logs  
 **KMS encryption** — AWS-managed or customer-managed keys  
 **Multi-region replication** — Disaster recovery support  
 **Resource policies** — Cross-account and fine-grained access control  
@@ -266,7 +266,7 @@ If migrating from another secret-handling system:
 ## FAQ
 
 **Q: How do I deploy without manually running AWS CLI?**  
-A: Use a Lambda function, CI/CD pipeline, or Kubernetes operator (see examples above).
+A: Use a Lambda function, CI/CD pipeline or Kubernetes operator (see examples above).
 
 **Q: What if I need secrets at `terraform apply` time?**  
 A: This module doesn't support that. Use a separate, temporary secret-injection step after `terraform apply`.
@@ -279,13 +279,6 @@ A: No, but pair with AWS Lambda or AWS Systems Manager Parameter Store for gener
 
 **Q: What about secret rotation?**  
 A: Configure `enable_rotation` and provide a Lambda ARN. Rotation happens independently of Terraform.
-
-## Contributing
-
-1. Validate: `terraform validate && terraform fmt -check`
-2. Add examples for new features
-3. Update README for user-facing changes
-4. No secret-related features — keep module focused on infrastructure only
 
 ## License
 
