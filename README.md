@@ -39,7 +39,7 @@ This module provides a **simple, reusable abstraction** that:
 
 ```hcl
 module "app_secret" {
-  source = "github.com/Anjaliksugathan/terraform-aws-secrets-manager-module2"
+  source = "github.com/Anjaliksugathan/terraform-aws-secrets-manager-module"
 
   name                    = "shared/platform/app/db"
   description             = "Database credentials (injected externally)"
