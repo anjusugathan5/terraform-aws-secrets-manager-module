@@ -1,5 +1,5 @@
 variable "aws_region" {
-  description = "AWS region for resources"
+  description = "AWS region for Secrets Manager resources"
   type        = string
   default     = "eu-west-1"
 }
@@ -13,50 +13,16 @@ variable "environment" {
 variable "secret_name" {
   description = "Name of the secret in AWS Secrets Manager"
   type        = string
-  default     = "shared/platform/app/config"
 }
 
-variable "azure_subscription_id" {
-  description = "Azure subscription ID"
-  type        = string
+variable "secret_values" {
+  description = "Final resolved secrets (must be injected externally, NOT fetched by Terraform)"
+  type        = map(string)
   sensitive   = true
-}
-
-variable "azure_tenant_id" {
-  description = "Azure tenant ID"
-  type        = string
-  sensitive   = true
-}
-
-variable "azure_client_id" {
-  description = "Azure service principal client ID"
-  type        = string
-  sensitive   = true
-}
-
-variable "azure_client_secret" {
-  description = "Azure service principal client secret"
-  type        = string
-  sensitive   = true
-}
-
-variable "azure_keyvault_name" {
-  description = "Name of the Azure Key Vault"
-  type        = string
-}
-
-variable "azure_resource_group_name" {
-  description = "Name of the Azure resource group"
-  type        = string
-}
-
-variable "azure_secret_name" {
-  description = "Name of the secret in Azure Key Vault"
-  type        = string
 }
 
 variable "kms_key_id" {
-  description = "Optional KMS key for secret encryption"
+  description = "Optional KMS key for encrypting the secret"
   type        = string
   default     = null
 }
@@ -77,4 +43,16 @@ variable "rotation_days" {
   description = "Rotation interval in days"
   type        = number
   default     = 30
+}
+
+variable "replica_regions" {
+  description = "Regions to replicate secret to"
+  type        = list(string)
+  default     = []
+}
+
+variable "tags" {
+  description = "Tags for AWS resources"
+  type        = map(string)
+  default     = {}
 }
