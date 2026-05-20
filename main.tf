@@ -20,17 +20,6 @@ resource "aws_secretsmanager_secret" "this" {
   )
 }
 
-resource "aws_secretsmanager_secret_version" "this" {
-  secret_id     = aws_secretsmanager_secret.this.id
-  secret_string = jsonencode(local.final_secrets)
-
-  lifecycle {
-    ignore_changes = [
-      secret_string
-    ]
-  }
-}
-
 resource "aws_secretsmanager_secret_policy" "this" {
   count = var.resource_policy != null ? 1 : 0
 
@@ -48,9 +37,3 @@ resource "aws_secretsmanager_secret_rotation" "this" {
     automatically_after_days = var.rotation_days
   }
 }
-
-# TODO:
-# - Add opinionated rotation Lambda submodule
-# - Add automatic secret generation
-# - Add cross-account access templates
-# - Add Terratest coverage

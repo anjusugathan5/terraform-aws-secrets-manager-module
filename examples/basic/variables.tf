@@ -1,4 +1,2 @@
-variable "secret_values" {
-  type      = map(string)
-  sensitive = true
-}
+# This example creates infrastructure only
+# Secret values are injected externally after Terraform deployment

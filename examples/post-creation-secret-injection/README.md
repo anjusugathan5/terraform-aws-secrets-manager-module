@@ -9,7 +9,7 @@ This example demonstrates the **recommended approach** for injecting secrets int
 ## Key Differences from Basic Example
 
 | Aspect | Basic | This Example |
-|--------|-------|--------------|
+|--------|-------|---------------|
 | Secret injection | External only | Terraform + External |
 | Who manages values | CI/CD, Lambda, etc. | Terraform initially, then external |
 | Use case | Long-running secrets | Initial setup + external updates |
@@ -203,42 +203,6 @@ db = connect_to_db(
 4. **Enable CloudTrail** logging for audit trail
 5. **Rotate credentials** regularly (see Lambda example above)
 6. **Use separate AWS accounts** for different environments
-
-## Comparison: Inline vs. External Injection
-
-### ❌ Don't Do This (Inline Injection)
-
-```hcl
-# BAD: Secrets in Terraform code
-module "secret" {
-  source = "../../"
-  name   = "my-secret"
-  
-  secret_values = {  # ← WRONG: ends up in state file
-    password = "secret123"
-  }
-}
-```
-
-### ✅ Do This (Post-Creation Injection)
-
-```hcl
-# GOOD: Infrastructure-only, inject after
-module "secret" {
-  source = "../../"
-  name   = "my-secret"
-  # No secret_values here!
-}
-
-resource "aws_secretsmanager_secret_version" "secret" {
-  secret_id     = module.secret.secret_id
-  secret_string = jsonencode(var.secret_values)  # From tfvars
-  
-  lifecycle {
-    ignore_changes = [secret_string]  # Allow external updates
-  }
-}
-```
 
 ## Cleanup
 

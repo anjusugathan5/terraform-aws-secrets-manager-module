@@ -72,7 +72,7 @@ Create a Lambda that periodically syncs secrets from Azure to AWS:
 ```python
 import boto3
 import json
-import requests
+import os
 from azure.identity import ClientSecretCredential
 from azure.keyvault.secrets import SecretClient
 
