@@ -17,65 +17,80 @@ provider "aws" {
 
 provider "azurerm" {
   features {}
+
   subscription_id = var.azure_subscription_id
   tenant_id       = var.azure_tenant_id
   client_id       = var.azure_client_id
   client_secret   = var.azure_client_secret
 }
 
-# Reference the Azure Key Vault
-data "azurerm_key_vault" "this" {
-  name                = var.azure_keyvault_name
-  resource_group_name = var.azure_resource_group_name
+# ============================================================
+# IMPORTANT: Secrets are fetched OUTSIDE Terraform module
+# This can be CI/CD, script, or external system
+# ============================================================
+
+data "external" "azure_secrets" {
+  program = ["bash", "${path.module}/scripts/fetch-azure-secrets.sh"]
+
+  query = {
+    key_vault_name = var.azure_keyvault_name
+    secret_name    = var.azure_secret_name
+  }
 }
 
-# Deploy the secret to AWS Secrets Manager
+locals {
+  # Secrets are already resolved externally
+  # Terraform NEVER directly reads Key Vault secrets
+  app_secrets = jsondecode(data.external.azure_secrets.result.secrets)
+
+  tags = {
+    Environment = var.environment
+    Team        = "platform"
+    Source      = "azure-keyvault-external"
+  }
+}
+
+# ============================================================
+# AWS Secrets Manager Module (INFRASTRUCTURE ONLY)
+# ============================================================
 module "app_secret" {
   source = "../../"
 
   name        = var.secret_name
-  description = "Application configuration stored in Azure Key Vault"
+  description = "Secrets injected externally into AWS Secrets Manager"
 
-  # Enable Azure Key Vault integration
-  use_azure_keyvault_source   = true
-  azure_keyvault_id           = data.azurerm_key_vault.this.id
-  azure_keyvault_secret_name  = var.azure_secret_name
+  # Only receives final resolved secrets
+  secret_values = local.app_secrets
 
-  # Multi-region replication
   replica_regions = [
     "eu-central-1",
     "eu-west-2"
   ]
 
-  # KMS encryption
-  kms_key_id = var.kms_key_id
-
-  # Recovery window
+  kms_key_id              = var.kms_key_id
   recovery_window_in_days = 7
 
-  # Optional: Enable rotation
   enable_rotation     = var.enable_rotation
   rotation_lambda_arn = var.rotation_lambda_arn
   rotation_days       = var.rotation_days
 
-  tags = {
-    Environment = var.environment
-    Team        = "platform"
-    Source      = "azure-keyvault"
-  }
+  tags = local.tags
 }
 
+# ============================================================
+# OUTPUTS
+# ============================================================
 output "secret_arn" {
-  description = "ARN of the secret in AWS Secrets Manager"
+  description = "AWS Secrets Manager secret ARN"
   value       = module.app_secret.secret_arn
 }
 
 output "secret_name" {
-  description = "Name of the secret"
+  description = "AWS Secrets Manager secret name"
   value       = module.app_secret.secret_name
 }
 
-output "source_type" {
-  description = "Secret source type"
-  value       = module.app_secret.source_type
+output "provisioning_mode" {
+  description = "External provisioning mode (metadata only)"
+  value       = module.app_secret.provisioning_mode
 }
