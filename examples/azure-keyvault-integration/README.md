@@ -1,221 +1,130 @@
-# Azure Key Vault Integration Example
+# ⚠️ DEPRECATED: Azure Key Vault Integration Example
 
-This example demonstrates how to use the Terraform AWS Secrets Manager module with **Azure Key Vault** as the secret source.
+This example is **deprecated** and no longer reflects the module's architecture. The module now follows an **infrastructure-only pattern** where secret values are injected externally.
 
-## Prerequisites
+## Migration Path
 
-1. **Azure subscription** with active access
-2. **Azure Key Vault** created and accessible
-3. **Service Principal** with permissions to read Key Vault secrets
-4. **AWS credentials** configured (via AWS CLI, environment variables, or IAM role)
-5. **Terraform** >= 1.0
+If you're using this example, migrate to one of these patterns:
 
-## Setup
+### Option 1: External Secret Fetch → Inject (Recommended)
 
-### Step 1: Create Azure Service Principal
+Use a **separate workflow** to fetch from Azure Key Vault and inject into AWS Secrets Manager:
 
 ```bash
-# Login to Azure
-az login
+#!/bin/bash
+# fetch-and-inject.sh
 
-# Set your subscription
-az account set --subscription "YOUR_SUBSCRIPTION_ID"
-
-# Create a service principal
-az ad sp create-for-rbac --name "terraform-secrets" --role Reader
-
-# Note the output:
-# {
-#   "appId": "your-client-id",
-#   "displayName": "terraform-secrets",
-#   "password": "your-client-secret",
-#   "tenant": "your-tenant-id"
-# }
-```
-
-### Step 2: Grant Key Vault Access
-
-```bash
-SP_OBJECT_ID=$(az ad sp list --display-name "terraform-secrets" --query '[0].id' -o tsv)
-
-az keyvault set-policy \
-  --name "your-keyvault-name" \
-  --object-id "$SP_OBJECT_ID" \
-  --secret-permissions get list
-```
-
-### Step 3: Store Secrets in Azure Key Vault
-
-```bash
-# Create a secret with database credentials (must be valid JSON)
-az keyvault secret set \
-  --vault-name "your-keyvault-name" \
+# Step 1: Fetch secret from Azure Key Vault
+SECRET_VALUE=$(az keyvault secret show \
+  --vault-name "my-vault" \
   --name "app-credentials" \
-  --value '{"username":"admin","password":"your-secure-password","host":"db.example.com"}'
+  --query value -o tsv)
 
-# Verify the secret
-az keyvault secret show --vault-name "your-keyvault-name" --name "app-credentials"
+# Step 2: Inject into AWS Secrets Manager (created by Terraform module)
+aws secretsmanager put-secret-value \
+  --secret-id shared/platform/app/db \
+  --secret-string "$SECRET_VALUE"
 ```
 
-### Step 4: Create terraform.tfvars
-
-```hcl
-aws_region                  = "eu-west-1"
-environment                 = "prod"
-secret_name                 = "shared/platform/app/config"
-az_subscription_id          = "your-subscription-id"
-az_tenant_id                = "your-tenant-id"
-az_client_id                = "your-client-id"
-az_client_secret            = "your-client-secret"
-azure_keyvault_name        = "your-keyvault-name"
-azure_resource_group_name  = "your-resource-group"
-azure_secret_name          = "app-credentials"
-```
-
-### Step 5: Deploy
-
+Run this **after** Terraform deploys the module:
 ```bash
-# Initialize Terraform
-terraform init
-
-# Preview changes
-terraform plan
-
-# Deploy (secrets are fetched from Azure Key Vault and injected into AWS Secrets Manager)
 terraform apply
+./fetch-and-inject.sh
 ```
 
-## How It Works
+### Option 2: GitHub Actions Workflow
 
-1. **Terraform authenticates** with Azure using the service principal
-2. **Retrieves the secret** from Azure Key Vault
-3. **Parses the secret** (must be valid JSON)
-4. **Injects the secrets** into AWS Secrets Manager in a single API call
-5. **Tags the secret** with `Source: azure_keyvault` for audit trail
+```yaml
+name: Deploy and Inject Secrets
 
-## Advantages
+on: [workflow_dispatch]
 
-✅ **Hybrid cloud setup** — Secrets in Azure, deployment in AWS
-✅ **Centralized management** — Single source of truth for secrets
-✅ **One-shot deployment** — Single `terraform apply` command
-✅ **No manual secret passing** — Automated secret retrieval
-✅ **Audit trail** — Every secret access logged in Azure
-✅ **Multi-region support** — AWS Secrets Manager replication
-✅ **KMS encryption** — Optional AWS KMS key for encryption
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 1: Deploy infrastructure with Terraform
+      - uses: actions/checkout@v3
+      - uses: hashicorp/setup-terraform@v2
+      - run: terraform apply -auto-approve
 
-## Secret Format
+      # Step 2: Fetch from Azure and inject into AWS
+      - uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-Secrets in Azure Key Vault **must be valid JSON**:
-
-```json
-{
-  "username": "admin",
-  "password": "secure-password",
-  "host": "db.example.com",
-  "port": "5432",
-  "database": "myapp"
-}
+      - name: Fetch and inject secrets
+        run: |
+          SECRET=$(az keyvault secret show \
+            --vault-name "${{ secrets.AZURE_VAULT_NAME }}" \
+            --name "app-credentials" \
+            --query value -o tsv)
+          
+          aws secretsmanager put-secret-value \
+            --secret-id shared/platform/app/db \
+            --secret-string "$SECRET"
 ```
 
-This will be injected as-is into AWS Secrets Manager.
+### Option 3: Lambda-Based Sync
 
-## Verifying the Deployment
+Create a Lambda that periodically syncs secrets from Azure to AWS:
 
-```bash
-# Check the secret in AWS Secrets Manager
-aws secretsmanager describe-secret \
-  --secret-id shared/platform/app/config \
-  --region eu-west-1
+```python
+import boto3
+import json
+import requests
+from azure.identity import ClientSecretCredential
+from azure.keyvault.secrets import SecretClient
 
-# Retrieve the secret value
-aws secretsmanager get-secret-value \
-  --secret-id shared/platform/app/config \
-  --region eu-west-1 | jq '.SecretString | fromjson'
+def lambda_handler(event, context):
+    # Auth with Azure
+    credential = ClientSecretCredential(
+        tenant_id=os.getenv('AZURE_TENANT_ID'),
+        client_id=os.getenv('AZURE_CLIENT_ID'),
+        client_secret=os.getenv('AZURE_CLIENT_SECRET')
+    )
+    
+    vault_url = f"https://{os.getenv('AZURE_VAULT_NAME')}.vault.azure.net"
+    client = SecretClient(vault_url=vault_url, credential=credential)
+    
+    # Fetch from Azure
+    secret = client.get_secret("app-credentials")
+    
+    # Inject to AWS
+    sm = boto3.client('secretsmanager')
+    sm.put_secret_value(
+        SecretId='shared/platform/app/db',
+        SecretString=secret.value
+    )
+    
+    return {"statusCode": 200}
 ```
 
-## Troubleshooting
+## Why This Change?
 
-### "Error: Unauthorized to perform action"
-- Verify service principal has Reader role
-- Check Key Vault access policies: `az keyvault show-deleted --name "your-keyvault-name" --resource-group "your-rg"`
+The old pattern mixed concerns:
+- ❌ Terraform reading from external systems (not idempotent)
+- ❌ Module handling secret values (outside module scope)
+- ❌ Tight coupling to Azure/Vault (reduces reusability)
+- ❌ Secrets in Terraform logs
 
-### "Secret not found in Key Vault"
-- Verify secret name: `az keyvault secret list --vault-name "your-keyvault-name"`
-- Check secret value is valid JSON: `az keyvault secret show --vault-name "your-keyvault-name" --name "app-credentials"`
+The new pattern:
+- ✅ Infrastructure-only Terraform module
+- ✅ External systems manage secret values
+- ✅ Secrets never in Terraform state
+- ✅ Clear separation of concerns
 
-### "Invalid JSON in secret"
-- Ensure the secret value is valid JSON
-- Use `jq` to validate: `echo 'your-secret-value' | jq .
+## See Also
 
-### "Terraform state contains secrets"
-- Use an encrypted remote state backend
-- Apply `terraform state lock` with Azure Storage
-- Restrict IAM access to the state bucket
+- `examples/basic/` — Simple infrastructure-only deployment
+- `examples/post-creation-secret-injection/` — Recommended pattern for injecting values
+- Module README — Complete documentation
 
-## Security Best Practices
+## Questions?
 
-1. **Never commit credentials** — Use environment variables or Terraform Cloud
-2. **Use managed identities** — If running from Azure VMs/Functions
-3. **Rotate credentials** — Implement a regular rotation schedule
-4. **Enable audit logging** — In Azure Key Vault and AWS CloudTrail
-5. **Use encrypted state backend** — Azure Storage with encryption
-6. **Restrict permissions** — Least privilege principle
-7. **Enable MFA** — For Azure account access
+If you have Azure Key Vault secrets to manage:
+1. Deploy the Terraform module (infrastructure only)
+2. Use one of the patterns above to inject secrets
+3. Track secret versions in your CI/CD system
 
-## Cleanup
-
-```bash
-# Destroy AWS resources
-terraform destroy
-
-# Optionally delete the secret from Azure Key Vault
-az keyvault secret delete --vault-name "your-keyvault-name" --name "app-credentials"
-```
-
-## Advanced: Multiple Secrets with Loop
-
-```hcl
-locals {
-  secrets = {
-    app = {
-      name     = "shared/platform/app/config"
-      azure_name = "app-credentials"
-    }
-    db = {
-      name     = "shared/platform/db/config"
-      azure_name = "db-credentials"
-    }
-  }
-}
-
-module "app_secrets" {
-  for_each = local.secrets
-  source   = "../../"
-
-  name        = each.value.name
-  description = "${each.key} configuration from Azure Key Vault"
-
-  use_azure_keyvault_source   = true
-  azure_keyvault_id           = data.azurerm_key_vault.this.id
-  azure_keyvault_secret_name  = each.value.azure_name
-
-  tags = {
-    Environment = var.environment
-    Component   = each.key
-  }
-}
-
-output "secret_arns" {
-  value = {
-    for name, secret in module.app_secrets :
-    name => secret.secret_arn
-  }
-}
-```
-
-## Next Steps
-
-- Integrate with CI/CD pipeline (GitHub Actions, Azure DevOps, GitLab CI)
-- Set up automatic secret rotation with Lambda
-- Enable audit logging for compliance
-- Implement cross-account access with resource policies
+This approach is more robust, auditable, and follows infrastructure-as-code best practices.
