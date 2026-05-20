@@ -25,13 +25,13 @@ This module provides a **simple, reusable abstraction** that:
 
 ## Key Features
 
-✅ **Zero-secrets architecture** — No secret values in Terraform state or logs  
-✅ **KMS encryption** — AWS-managed or customer-managed keys  
-✅ **Multi-region replication** — Disaster recovery support  
-✅ **Resource policies** — Cross-account and fine-grained access control  
-✅ **Automatic rotation** — Lambda-based external rotation  
-✅ **Safe deletion** — Recovery window (7-30 days)  
-✅ **Simple outputs** — ARN, name, region info (no secrets)  
+**Zero-secrets architecture** — No secret values in Terraform state or logs  
+**KMS encryption** — AWS-managed or customer-managed keys  
+**Multi-region replication** — Disaster recovery support  
+**Resource policies** — Cross-account and fine-grained access control  
+**Automatic rotation** — Lambda-based external rotation  
+**Safe deletion** — Recovery window (7-30 days)  
+**Simple outputs** — ARN, name, region info (no secrets)  
 
 ## Quick Start
 
@@ -210,10 +210,10 @@ const dbConfig = JSON.parse(secret.SecretString);
 
 ### What This Module PREVENTS
 
-- ❌ Secrets in Terraform state
-- ❌ Secrets in `terraform apply` logs
-- ❌ Secrets in Terraform plan output
-- ❌ Unencrypted secrets in AWS Secrets Manager
+-  Secrets in Terraform state
+-  Secrets in `terraform apply` logs
+-  Secrets in Terraform plan output
+-  Unencrypted secrets in AWS Secrets Manager
 
 ### Best Practices Implemented
 
