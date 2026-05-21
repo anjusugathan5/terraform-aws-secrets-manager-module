@@ -12,10 +12,10 @@ This is a reference implementation for PostgreSQL.
 For other systems (MySQL, RDS, API keys), adapt the SET and TEST steps.
 
 Security Notes:
-- Username is assumed to be trusted (internal/configuration-only).
-- For untrusted username sources, use psycopg2.sql.Identifier for quoting.
-- Secrets Manager state is authoritative; Lambda failures trigger retry.
-- Credentials are stored as JSON in Secrets Manager.
+- Username is safely quoted using psycopg2.sql.Identifier
+- Secrets Manager state is authoritative; Lambda failures trigger retry
+- Credentials are stored as JSON in Secrets Manager
+- Uses AWS-native password generation
 """
 
 import json
@@ -27,6 +27,7 @@ import logging
 
 # Initialize clients
 secrets_client = boto3.client('secretsmanager')
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -34,14 +35,6 @@ logger.setLevel(logging.INFO)
 def get_secret_dict(secret_id, stage, token=None):
     """
     Retrieve secret value from Secrets Manager.
-
-    Args:
-        secret_id: ARN or name of the secret
-        stage: "AWSCURRENT", "AWSPENDING", or specific version ID
-        token: VersionId for AWSPENDING (required if stage="AWSPENDING")
-
-    Returns:
-        Dictionary with secret key-value pairs
     """
     try:
         if stage == "AWSPENDING":
@@ -55,24 +48,58 @@ def get_secret_dict(secret_id, stage, token=None):
                 SecretId=secret_id,
                 VersionStage=stage
             )
+
         return json.loads(response['SecretString'])
+
     except Exception as e:
-        logger.error(f"Error retrieving secret {secret_id} stage {stage}: {str(e)}")
+        logger.error(f"Error retrieving secret stage {stage}: {str(e)}")
         raise
+
+
+def validate_pending_version(secret_id, token):
+    """
+    Validate that the rotation token exists and is marked AWSPENDING.
+    """
+
+    metadata = secrets_client.describe_secret(
+        SecretId=secret_id
+    )
+
+    versions = metadata.get("VersionIdsToStages", {})
+
+    if token not in versions:
+        raise ValueError(f"Rotation token {token} not found")
+
+    if "AWSPENDING" not in versions[token]:
+        raise ValueError(f"Version {token} is not marked AWSPENDING")
 
 
 def set_secret_version_stage(secret_id, version_id, stage):
     """
-    Move a version to a new stage (e.g., AWSPENDING → AWSCURRENT).
+    Move version to a new stage.
     """
+
     try:
+        metadata = secrets_client.describe_secret(
+            SecretId=secret_id
+        )
+
+        current_version = None
+
+        for existing_version, stages in metadata["VersionIdsToStages"].items():
+            if "AWSCURRENT" in stages:
+                current_version = existing_version
+                break
+
         secrets_client.update_secret_version_stage(
             SecretId=secret_id,
             VersionStage=stage,
             MoveToVersionId=version_id,
-            RemoveFromVersionId=None  # Auto-remove from old version
+            RemoveFromVersionId=current_version
         )
+
         logger.info(f"Moved version {version_id} to stage {stage}")
+
     except Exception as e:
         logger.error(f"Error updating version stage: {str(e)}")
         raise
@@ -82,15 +109,18 @@ def connect_to_database(host, port, user, password, database):
     """
     Establish PostgreSQL connection.
     """
+
     try:
-        conn = psycopg2.connect(
+        return psycopg2.connect(
             host=host,
             port=port,
             user=user,
             password=password,
-            database=database
+            database=database,
+            sslmode="require",
+            connect_timeout=10
         )
-        return conn
+
     except Exception as e:
         logger.error(f"Database connection failed: {str(e)}")
         raise
@@ -98,27 +128,37 @@ def connect_to_database(host, port, user, password, database):
 
 def create_secret(secret_id, client_request_token):
     """
-    CREATE step: Generate new database password and store as AWSPENDING version.
-
-    Creates a new secret version with a randomly generated password.
-    This version is tagged as AWSPENDING (not yet active).
+    CREATE step:
+    Generate new password and store as AWSPENDING.
     """
-    logger.info(f"CREATE: Generating new password for secret {secret_id}")
 
-    # Retrieve current secret to get username
-    current_secret = get_secret_dict(secret_id, "AWSCURRENT")
+    logger.info("CREATE: Generating new password")
+
+    # Validate if version already exists
+    metadata = secrets_client.describe_secret(
+        SecretId=secret_id
+    )
+
+    versions = metadata.get("VersionIdsToStages", {})
+
+    if client_request_token in versions:
+        if "AWSPENDING" in versions[client_request_token]:
+            logger.info("CREATE: Version already exists")
+            return
+
+    current_secret = get_secret_dict(
+        secret_id,
+        "AWSCURRENT"
+    )
+
     username = current_secret['username']
 
-    # TODO: Use secrets_client.get_random_password() for production:
-    # new_password = secrets_client.get_random_password(
-    #     PasswordLength=32,
-    #     ExcludeCharacters='/@"\\'
-    # )['RandomPassword']
-    # For now, simple placeholder (replace with actual generation)
-    import secrets
-    new_password = secrets.token_urlsafe(24)
+    # AWS-native secure password generation
+    new_password = secrets_client.get_random_password(
+        PasswordLength=32,
+        ExcludeCharacters='/@"\\'
+    )['RandomPassword']
 
-    # Store new version with AWSPENDING label
     new_secret = {
         'username': username,
         'password': new_password
@@ -131,7 +171,9 @@ def create_secret(secret_id, client_request_token):
             SecretString=json.dumps(new_secret),
             VersionStages=['AWSPENDING']
         )
-        logger.info(f"CREATE: New version {client_request_token} created with AWSPENDING label")
+
+        logger.info("CREATE: New AWSPENDING version created")
+
     except Exception as e:
         logger.error(f"CREATE failed: {str(e)}")
         raise
@@ -139,41 +181,56 @@ def create_secret(secret_id, client_request_token):
 
 def set_secret(secret_id, client_request_token):
     """
-    SET step: Update database password to the new pending secret.
-
-    Connects to database and changes the user's password to the new value.
+    SET step:
+    Apply new password to PostgreSQL user.
     """
-    logger.info(f"SET: Applying new password to database")
 
-    # Get current credentials (to connect with)
-    current_secret = get_secret_dict(secret_id, "AWSCURRENT")
-    # Get pending credentials (new password)
-    pending_secret = get_secret_dict(secret_id, "AWSPENDING", client_request_token)
+    logger.info("SET: Applying new password")
+
+    validate_pending_version(secret_id, client_request_token)
+
+    current_secret = get_secret_dict(
+        secret_id,
+        "AWSCURRENT"
+    )
+
+    pending_secret = get_secret_dict(
+        secret_id,
+        "AWSPENDING",
+        client_request_token
+    )
 
     username = current_secret['username']
     current_password = current_secret['password']
     new_password = pending_secret['password']
 
-    # Database connection parameters (from environment or Terraform)
     host = os.environ.get('DB_HOST', 'localhost')
     port = os.environ.get('DB_PORT', '5432')
     database = os.environ.get('DB_NAME', 'postgres')
 
     try:
-        # Connect with current credentials
-        conn = connect_to_database(host, port, username, current_password, database)
-        cur = conn.cursor()
+        # Use context managers for automatic cleanup
+        with connect_to_database(
+            host,
+            port,
+            username,
+            current_password,
+            database
+        ) as conn:
 
-        # Update password for the user
-        # Note: Username is assumed trusted (from internal Terraform config).
-        # For untrusted sources, use: sql.Identifier(username)
-        cur.execute(
-            f"ALTER USER {username} WITH PASSWORD %s",
-            (new_password,)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+            with conn.cursor() as cur:
+
+                # Safely quote username identifier
+                cur.execute(
+                    sql.SQL(
+                        "ALTER USER {} WITH PASSWORD %s"
+                    ).format(
+                        sql.Identifier(username)
+                    ),
+                    (new_password,)
+                )
+
+                conn.commit()
 
         logger.info(f"SET: Password updated for user {username}")
 
@@ -184,13 +241,19 @@ def set_secret(secret_id, client_request_token):
 
 def test_secret(secret_id, client_request_token):
     """
-    TEST step: Verify new password works by connecting to the database.
-
-    This validates that the SET step succeeded before promoting to CURRENT.
+    TEST step:
+    Validate new credentials work.
     """
-    logger.info(f"TEST: Validating new credentials")
 
-    pending_secret = get_secret_dict(secret_id, "AWSPENDING", client_request_token)
+    logger.info("TEST: Validating new credentials")
+
+    validate_pending_version(secret_id, client_request_token)
+
+    pending_secret = get_secret_dict(
+        secret_id,
+        "AWSPENDING",
+        client_request_token
+    )
 
     username = pending_secret['username']
     new_password = pending_secret['password']
@@ -200,14 +263,23 @@ def test_secret(secret_id, client_request_token):
     database = os.environ.get('DB_NAME', 'postgres')
 
     try:
-        conn = connect_to_database(host, port, username, new_password, database)
-        cur = conn.cursor()
-        cur.execute("SELECT version();")
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
+        with connect_to_database(
+            host,
+            port,
+            username,
+            new_password,
+            database
+        ) as conn:
 
-        logger.info(f"TEST: Successfully connected with new credentials. Version: {result[0][:50]}")
+            with conn.cursor() as cur:
+
+                cur.execute("SELECT version();")
+                result = cur.fetchone()
+
+        logger.info(
+            f"TEST: Successfully connected. "
+            f"Version: {result[0][:50]}"
+        )
 
     except Exception as e:
         logger.error(f"TEST failed: {str(e)}")
@@ -216,15 +288,22 @@ def test_secret(secret_id, client_request_token):
 
 def finish_secret(secret_id, client_request_token):
     """
-    FINISH step: Promote AWSPENDING to AWSCURRENT.
-
-    This makes the new password the active version.
+    FINISH step:
+    Promote AWSPENDING -> AWSCURRENT.
     """
-    logger.info(f"FINISH: Promoting new version to AWSCURRENT")
+
+    logger.info("FINISH: Promoting new version")
+
+    validate_pending_version(secret_id, client_request_token)
 
     try:
-        set_secret_version_stage(secret_id, client_request_token, "AWSCURRENT")
-        logger.info(f"FINISH: Rotation complete. New version is now AWSCURRENT")
+        set_secret_version_stage(
+            secret_id,
+            client_request_token,
+            "AWSCURRENT"
+        )
+
+        logger.info("FINISH: Rotation completed")
 
     except Exception as e:
         logger.error(f"FINISH failed: {str(e)}")
@@ -241,16 +320,16 @@ def lambda_handler(event, context):
         "Step": "create|set|test|finish",
         "Token": "version-token-uuid"
     }
-
-    Must implement all 4 steps and handle errors appropriately.
     """
+
     secret_id = event['SecretId']
     step = event['Step']
     token = event.get('Token', '')
 
-    logger.info(f"Rotation Lambda invoked: secret={secret_id}, step={step}, token={token}")
+    logger.info(f"Rotation Lambda invoked: step={step}")
 
     try:
+
         if step == "create":
             create_secret(secret_id, token)
 
@@ -264,26 +343,36 @@ def lambda_handler(event, context):
             finish_secret(secret_id, token)
 
         else:
-            raise ValueError(f"Invalid step: {step}. Must be create|set|test|finish")
+            raise ValueError(
+                f"Invalid step: {step}. "
+                f"Must be create|set|test|finish"
+            )
 
         logger.info(f"Step '{step}' completed successfully")
+
         return {
             'statusCode': 200,
-            'body': json.dumps(f"Rotation step '{step}' completed successfully")
+            'body': json.dumps(
+                f"Rotation step '{step}' completed successfully"
+            )
         }
 
     except Exception as e:
-        logger.error(f"Rotation failed at step '{step}': {str(e)}")
-        # AWS will retry failed rotations automatically
+
+        logger.error(
+            f"Rotation failed at step '{step}': {str(e)}"
+        )
+
+        # AWS Secrets Manager automatically retries failures
         raise
 
 
 # TODO (Production Hardening):
-# - Add CloudWatch metrics for rotation success/failure
-# - Add SNS notifications on rotation events
-# - Add retry logic with exponential backoff
-# - Add support for multiple database types (MySQL, Oracle, etc.)
-# - Add certificate validation for RDS connections
-# - Add VPC Endpoint support for Secrets Manager
-# - Add comprehensive error classification
-# - Add secret rotation audit logging
+# - Add CloudWatch metrics
+# - Add SNS notifications
+# - Add exponential retry handling
+# - Add support for MySQL/Oracle
+# - Add certificate pinning
+# - Add VPC endpoint support
+# - Add audit logging
+# - Add structured JSON logging
